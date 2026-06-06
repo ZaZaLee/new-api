@@ -8,7 +8,7 @@ spec:
   tls:
     - hosts:
         - pg.cocox.ai
-      secretName: pg.cocox.ai
+      secretName: cocox-ai-wildcard
   rules:
     - host: pg.cocox.ai
       http:
