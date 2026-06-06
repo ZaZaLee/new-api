@@ -1,0 +1,22 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: new-api
+  namespace: ai
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - pg.cocox.ai
+      secretName: pg.cocox.ai
+  rules:
+    - host: pg.cocox.ai
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: new-api
+                port:
+                  number: 3000
