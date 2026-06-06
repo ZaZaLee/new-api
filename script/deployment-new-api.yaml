@@ -1,0 +1,328 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: harbor-registry
+  namespace: ai
+type: kubernetes.io/dockerconfigjson
+stringData:
+  .dockerconfigjson: |
+    {"auths":{"sig-harbor.vancygame.com":{"username":"admin","password":"tG8dS1mP6yA0tB9x","auth":"YWRtaW46dEc4ZFMxbVA2eUEwdEI5eA=="}}}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: new-api-secret
+  namespace: ai
+type: Opaque
+stringData:
+  POSTGRES_USER: root
+  POSTGRES_PASSWORD: "123456"
+  POSTGRES_DB: new-api
+  REDIS_PASSWORD: "123456"
+  SQL_DSN: postgresql://root:123456@postgres:5432/new-api
+  REDIS_CONN_STRING: redis://:123456@redis:6379
+  SESSION_SECRET: change-this-session-secret
+  CRYPTO_SECRET: change-this-crypto-secret
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: new-api-config
+  namespace: ai
+data:
+  TZ: Asia/Shanghai
+  ERROR_LOG_ENABLED: "true"
+  BATCH_UPDATE_ENABLED: "true"
+  NODE_NAME: new-api-node-1
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: new-api-data
+  namespace: ai
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: new-api-logs
+  namespace: ai
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: new-api-postgres-data
+  namespace: ai
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: ai
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - exec redis-server --requirepass "$REDIS_PASSWORD"
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: new-api-secret
+                  key: REDIS_PASSWORD
+          ports:
+            - containerPort: 6379
+              name: redis
+          readinessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: ai
+spec:
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: ai
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: new-api-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: new-api-secret
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: new-api-secret
+                  key: POSTGRES_DB
+          ports:
+            - containerPort: 5432
+              name: postgres
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            tcpSocket:
+              port: postgres
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: postgres
+            initialDelaySeconds: 20
+            periodSeconds: 20
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: new-api-postgres-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: ai
+spec:
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: new-api
+  namespace: ai
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: new-api
+  template:
+    metadata:
+      labels:
+        app: new-api
+    spec:
+      imagePullSecrets:
+        - name: harbor-registry
+      initContainers:
+        - name: wait-for-redis
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - until nc -z redis 6379; do sleep 2; done
+        - name: wait-for-postgres
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - until nc -z postgres 5432; do sleep 2; done
+      containers:
+        - name: new-api
+          image: sig-harbor.vancygame.com/ai/new-api:ai-sig
+          imagePullPolicy: Always
+          args:
+            - --log-dir
+            - /app/logs
+          env:
+            - name: SQL_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: new-api-secret
+                  key: SQL_DSN
+            - name: REDIS_CONN_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: new-api-secret
+                  key: REDIS_CONN_STRING
+            - name: SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: new-api-secret
+                  key: SESSION_SECRET
+            - name: CRYPTO_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: new-api-secret
+                  key: CRYPTO_SECRET
+            - name: TZ
+              valueFrom:
+                configMapKeyRef:
+                  name: new-api-config
+                  key: TZ
+            - name: ERROR_LOG_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: new-api-config
+                  key: ERROR_LOG_ENABLED
+            - name: BATCH_UPDATE_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: new-api-config
+                  key: BATCH_UPDATE_ENABLED
+            - name: NODE_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: new-api-config
+                  key: NODE_NAME
+          ports:
+            - containerPort: 3000
+              name: http
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: logs
+              mountPath: /app/logs
+          readinessProbe:
+            httpGet:
+              path: /api/status
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/status
+              port: http
+            initialDelaySeconds: 40
+            periodSeconds: 20
+            timeoutSeconds: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: new-api-data
+        - name: logs
+          persistentVolumeClaim:
+            claimName: new-api-logs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: new-api
+  namespace: ai
+spec:
+  selector:
+    app: new-api
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
